@@ -71,7 +71,11 @@ def make_handler(service: Service, static_dir: str):
                 status = 400
             else:
                 status = 500
-            self._json(status, {"error": exc.__class__.__name__, "message": str(exc)})
+            body = {"error": exc.__class__.__name__, "message": str(exc)}
+            payload = getattr(exc, "payload", None)
+            if payload:
+                body["details"] = payload
+            self._json(status, body)
 
         def do_GET(self) -> None:
             try:
@@ -89,6 +93,21 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"records": service.list_records(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/equipment"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"equipment": service.list_equipment(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/renewals"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"renewals": service.list_renewals(item_id, role)})
+                elif path.startswith("/api/renewals/"):
+                    renewal_id = int(path.rsplit("/", 1)[-1])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_renewal(renewal_id, role))
                 elif path.startswith("/api/items/"):
                     item_id = int(path.rsplit("/", 1)[-1])
                     actor, role = self._identity()
@@ -119,6 +138,27 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                elif (path.startswith("/api/items/") and "/equipment/" in path
+                        and path.endswith("/status")):
+                    parts = path.split("/")
+                    self._json(200, service.set_equipment_status(
+                        int(parts[3]), int(parts[5]), body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/equipment"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.register_equipment(item_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/inspection-corrections"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.correct_inspection(item_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/renewals"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.submit_renewal(item_id, body, actor, role))
+                elif path.startswith("/api/renewals/") and path.endswith("/materials"):
+                    renewal_id = int(path.split("/")[3])
+                    self._json(200, service.supplement_materials(
+                        renewal_id, body, actor, role))
+                elif path.startswith("/api/renewals/") and path.endswith("/approve"):
+                    renewal_id = int(path.split("/")[3])
+                    self._json(200, service.approve_renewal(renewal_id, body, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

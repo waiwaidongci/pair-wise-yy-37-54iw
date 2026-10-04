@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from .domain import (ConflictError, DomainError, NotFoundError, PermissionDenied,
-                     ValidationError)
+                     ValidationError, VersionConflict)
 from .service import Service
 
 
@@ -63,6 +63,14 @@ def make_handler(service: Service, static_dir: str):
                 status = 404
             elif isinstance(exc, PermissionDenied):
                 status = 403
+            elif isinstance(exc, VersionConflict):
+                status = 409
+                body = {"error": "VersionConflict", "message": str(exc)}
+                if exc.diff is not None:
+                    body["diff"] = exc.diff
+                    body["conflicting_materials"] = exc.conflicting_materials
+                self._json(status, body)
+                return
             elif isinstance(exc, ConflictError):
                 status = 409
             elif isinstance(exc, ValueError):
@@ -76,6 +84,7 @@ def make_handler(service: Service, static_dir: str):
         def do_GET(self) -> None:
             try:
                 path = urlparse(self.path).path
+                parts = [p for p in path.split("/") if p]
                 if path == "/health":
                     self._json(200, {"status": "ok"})
                 elif path == "/":
@@ -84,6 +93,26 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"items": service.list_items(role)})
+                elif len(parts) == 4 and parts[0] == 'api' and parts[1] == 'items' and parts[3] == 'equipment':
+                    item_id = int(parts[2])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"equipment": service.list_equipment(item_id, role)})
+                elif len(parts) == 4 and parts[0] == 'api' and parts[1] == 'items' and parts[3] == 'renewals':
+                    item_id = int(parts[2])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"renewals": service.list_renewals(item_id, role)})
+                elif len(parts) == 3 and parts[0] == 'api' and parts[1] == 'renewals':
+                    application_no = parts[2]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.get_renewal(application_no, role))
+                elif len(parts) == 4 and parts[0] == 'api' and parts[1] == 'renewals' and parts[3] == 'resume':
+                    application_no = parts[2]
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.resume_renewal(application_no, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     actor, role = self._identity()
@@ -106,10 +135,34 @@ def make_handler(service: Service, static_dir: str):
         def do_POST(self) -> None:
             try:
                 path = urlparse(self.path).path
+                parts = [p for p in path.split("/") if p]
                 actor, role = self._identity()
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif len(parts) == 4 and parts[0] == 'api' and parts[1] == 'items' and parts[3] == 'equipment':
+                    item_id = int(parts[2])
+                    self._json(201, service.create_equipment(item_id, body, actor, role))
+                elif len(parts) == 6 and parts[0] == 'api' and parts[1] == 'items' and parts[3] == 'equipment' and parts[5] in ('start', 'stop'):
+                    item_id = int(parts[2])
+                    equipment_id = int(parts[4])
+                    target = 'running' if parts[5] == 'start' else 'stopped'
+                    self._json(200, service.set_equipment_status(
+                        item_id, equipment_id, target, actor, role))
+                elif len(parts) == 4 and parts[0] == 'api' and parts[1] == 'items' and parts[3] == 'renewals':
+                    item_id = int(parts[2])
+                    self._json(201, service.create_renewal(item_id, body, actor, role))
+                elif len(parts) == 6 and parts[0] == 'api' and parts[1] == 'items' and parts[3] == 'records' and parts[5] == 'correct':
+                    item_id = int(parts[2])
+                    record_id = int(parts[4])
+                    self._json(200, service.correct_record(
+                        item_id, record_id, body, actor, role))
+                elif len(parts) == 4 and parts[0] == 'api' and parts[1] == 'renewals' and parts[3] in ('submit', 'approve'):
+                    application_no = parts[2]
+                    if parts[3] == 'submit':
+                        self._json(200, service.submit_renewal(application_no, body, actor, role))
+                    else:
+                        self._json(200, service.approve_renewal(application_no, body, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
@@ -119,6 +172,21 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                else:
+                    self._json(404, {"error": "not_found"})
+            except Exception as exc:
+                self._send_error(exc)
+
+        def do_PUT(self) -> None:
+            try:
+                path = urlparse(self.path).path
+                parts = [p for p in path.split("/") if p]
+                actor, role = self._identity()
+                body = self._body()
+                if len(parts) == 4 and parts[0] == 'api' and parts[1] == 'renewals' and parts[3] == 'materials':
+                    application_no = parts[2]
+                    self._json(200, service.save_renewal_materials(
+                        application_no, body, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .domain import ensure_role, normalize_severity, require_number, require_text
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
+from .rules import (APPROVE_ROLES, AUDIT_ROLES, CREATE_ROLES, ENTITY,
+                    EQUIPMENT_ROLES, RECORD_CORRECTION_ROLES, RECORD_ROLES,
+                    RENEWAL_ROLES, TITLE, VIEW_ROLES, completion_blockers,
+                    escalation_required, hash_material, priority_score,
+                    response_deadline_hours, role_for_transition,
                     validate_transition)
 
 
@@ -90,6 +92,115 @@ class Service:
     def audit(self, role: str, item_id: Optional[int] = None) -> list:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
+
+    # ---- 设备台账 ----
+    def create_equipment(self, item_id: int, payload: Dict[str, Any],
+                         actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, EQUIPMENT_ROLES)
+        actor = require_text(actor, "actor", 100)
+        name = require_text(payload.get("name"), "name", 100)
+        return self.repository.create_equipment(item_id, name, actor)
+
+    def list_equipment(self, item_id: int, role: str) -> list:
+        self._view(role)
+        return self.repository.list_equipment(item_id)
+
+    def set_equipment_status(self, item_id: int, equipment_id: int,
+                             target_status: str, actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, EQUIPMENT_ROLES)
+        actor = require_text(actor, "actor", 100)
+        if target_status not in ('running', 'stopped'):
+            raise ValueError("设备状态必须是running或stopped")
+        return self.repository.set_equipment_status(
+            item_id, equipment_id, target_status, actor)
+
+    # ---- 检查记录更正 ----
+    def correct_record(self, item_id: int, record_id: int, payload: Dict[str, Any],
+                       actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, RECORD_CORRECTION_ROLES)
+        actor = require_text(actor, "actor", 100)
+        detail = require_text(payload.get("detail"), "detail")
+        return self.repository.correct_record(item_id, record_id, detail, actor)
+
+    # ---- 续期（影响清单）----
+    def create_renewal(self, item_id: int, payload: Dict[str, Any],
+                       actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, RENEWAL_ROLES)
+        actor = require_text(actor, "actor", 100)
+        application_no = payload.get("application_no")
+        if application_no is not None:
+            application_no = require_text(application_no, "application_no", 100)
+        return self.repository.create_renewal(item_id, application_no, actor)
+
+    def get_renewal(self, application_no: str, role: str) -> Dict[str, Any]:
+        self._view(role)
+        renewal = self.repository.get_renewal_by_application(application_no)
+        return self._renewal_detail(renewal)
+
+    def list_renewals(self, item_id: int, role: str,
+                      status: Optional[str] = None) -> list:
+        self._view(role)
+        return [self._renewal_detail(r)
+                for r in self.repository.list_renewals(item_id, status)]
+
+    def _renewal_detail(self, renewal: Dict[str, Any]) -> Dict[str, Any]:
+        materials = self.repository.list_materials(renewal['id'])
+        return dict(renewal, materials=materials)
+
+    def save_renewal_materials(self, application_no: str, payload: Dict[str, Any],
+                               actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, RENEWAL_ROLES)
+        actor = require_text(actor, "actor", 100)
+        expected_version = payload.get("expected_version")
+        if not isinstance(expected_version, int) or expected_version < 1:
+            raise ValueError("expected_version必须是正整数")
+        raw_materials = payload.get("materials")
+        if not isinstance(raw_materials, list) or not raw_materials:
+            raise ValueError("materials必须是非空数组")
+        materials: List[Dict[str, str]] = []
+        names = set()
+        for m in raw_materials:
+            if not isinstance(m, dict):
+                raise ValueError("材料必须是对象")
+            name = require_text(m.get("name"), "name", 100)
+            content = require_text(m.get("content"), "content")
+            if name in names:
+                raise ValueError(f"材料{name}重复")
+            names.add(name)
+            materials.append({"name": name, "content": content,
+                              "content_hash": hash_material(content)})
+        return self.repository.save_renewal_materials(
+            application_no, expected_version, materials, actor)
+
+    def submit_renewal(self, application_no: str, payload: Dict[str, Any],
+                        actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, RENEWAL_ROLES)
+        actor = require_text(actor, "actor", 100)
+        expected_version = payload.get("expected_version")
+        if not isinstance(expected_version, int) or expected_version < 1:
+            raise ValueError("expected_version必须是正整数")
+        return self.repository.submit_renewal(
+            application_no, expected_version, actor)
+
+    def approve_renewal(self, application_no: str, payload: Dict[str, Any],
+                        actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, APPROVE_ROLES)
+        actor = require_text(actor, "actor", 100)
+        expected_version = payload.get("expected_version")
+        if not isinstance(expected_version, int) or expected_version < 1:
+            raise ValueError("expected_version必须是正整数")
+        conclusion = require_text(payload.get("conclusion"), "conclusion", 2000)
+        return self.repository.approve_renewal(
+            application_no, expected_version, conclusion, actor)
+
+    def resume_renewal(self, application_no: str, role: str) -> Dict[str, Any]:
+        self._view(role)
+        renewal = self.repository.get_renewal_by_application(application_no)
+        materials = self.repository.list_materials(renewal['id'])
+        versions = self.repository.list_renewal_versions(renewal['id'])
+        events = self.repository.list_environment_events(renewal['item_id'])
+        return {"renewal": renewal, "materials": materials,
+                "versions": versions, "environment_events": events}
 
     @staticmethod
     def enrich(item: Dict[str, Any]) -> Dict[str, Any]:
